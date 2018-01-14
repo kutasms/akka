@@ -34,59 +34,47 @@ object ReplicatorSpec {
   final case object Increment extends ClientCommand
   final case class GetValue(replyTo: ActorRef[Int]) extends ClientCommand
   final case class GetCachedValue(replyTo: ActorRef[Int]) extends ClientCommand
-  private sealed trait InternalMsg extends ClientCommand
-  private case class InternalUpdateResponse[A <: ReplicatedData](rsp: Replicator.UpdateResponse[A]) extends InternalMsg
-  private case class InternalGetResponse[A <: ReplicatedData](rsp: Replicator.GetResponse[A]) extends InternalMsg
-  private case class InternalChanged[A <: ReplicatedData](chg: Replicator.Changed[A]) extends InternalMsg
 
   val Key = GCounterKey("counter")
 
   def client(replicator: ActorRef[Replicator.Command])(implicit cluster: Cluster): Behavior[ClientCommand] =
     Actor.deferred[ClientCommand] { ctx ⇒
-      val updateResponseAdapter: ActorRef[Replicator.UpdateResponse[GCounter]] =
-        ctx.spawnAdapter(InternalUpdateResponse.apply)
-
-      val getResponseAdapter: ActorRef[Replicator.GetResponse[GCounter]] =
-        ctx.spawnAdapter(InternalGetResponse.apply)
-
-      val changedAdapter: ActorRef[Replicator.Changed[GCounter]] =
-        ctx.spawnAdapter(InternalChanged.apply)
-
-      replicator ! Replicator.Subscribe(Key, changedAdapter)
+      replicator ! Replicator.Subscribe(Key, ctx.self.upcast)
 
       def behavior(cachedValue: Int): Behavior[ClientCommand] = {
         Actor.immutable[ClientCommand] { (ctx, msg) ⇒
           msg match {
             case Increment ⇒
-              replicator ! Replicator.Update(Key, GCounter.empty, Replicator.WriteLocal, updateResponseAdapter)(_ + 1)
+              replicator ! Replicator.Update(Key, GCounter.empty, Replicator.WriteLocal, ctx.self.upcast)(_ + 1)
               Actor.same
 
             case GetValue(replyTo) ⇒
-              replicator ! Replicator.Get(Key, Replicator.ReadLocal, getResponseAdapter, Some(replyTo))
+              replicator ! Replicator.Get(Key, Replicator.ReadLocal, ctx.self.upcast, Some(replyTo))
               Actor.same
 
             case GetCachedValue(replyTo) ⇒
-              replicator ! Replicator.Get(Key, Replicator.ReadLocal, getResponseAdapter, Some(replyTo))
+              replicator ! Replicator.Get(Key, Replicator.ReadLocal, ctx.self.upcast, Some(replyTo))
               Actor.same
-
-            case internal: InternalMsg ⇒ internal match {
-              case InternalUpdateResponse(_) ⇒ Actor.same // ok
-
-              case InternalGetResponse(rsp @ Replicator.GetSuccess(Key, Some(replyTo: ActorRef[Int] @unchecked))) ⇒
-                val value = rsp.get(Key).value.toInt
-                replyTo ! value
-                Actor.same
-
-              case InternalGetResponse(rsp) ⇒
-                Actor.unhandled // not dealing with failures
-
-              case InternalChanged(chg @ Replicator.Changed(Key)) ⇒
-                val value = chg.get(Key).value.intValue
-                behavior(value)
-            }
           }
         }
       }
+        .onResponse[Replicator.GetResponse[GCounter]] { (_, msg) ⇒
+          msg match {
+            case rsp @ Replicator.GetSuccess(Key, Some(replyTo: ActorRef[Int] @unchecked)) ⇒
+              val value = rsp.get(Key).value.toInt
+              replyTo ! value
+              Actor.same
+            case _ ⇒
+              Actor.unhandled // not dealing with failures
+          }
+        }
+        .onResponse[Replicator.Changed[GCounter]] { (ctx, chg) ⇒
+          val value = chg.get(Key).value.intValue
+          behavior(value)
+        }
+        .onResponse[Replicator.UpdateResponse[GCounter]] { (_, _) ⇒
+          Actor.same // ok
+        }
 
       behavior(cachedValue = 0)
     }

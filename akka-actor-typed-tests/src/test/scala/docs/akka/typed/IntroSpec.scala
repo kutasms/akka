@@ -58,6 +58,7 @@ object IntroSpec {
       Actor.immutable[Command] { (ctx, msg) ⇒
         msg match {
           case GetSession(screenName, client) ⇒
+            // FIXME resource leak of spawnAdapter like this, use ask instead since we need the screenName
             val wrapper = ctx.spawnAdapter {
               p: PostMessage ⇒ PostSessionMessage(screenName, p.message)
             }
